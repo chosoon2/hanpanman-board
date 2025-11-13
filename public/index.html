@@ -112,10 +112,13 @@
 
     // 글 목록 불러오기
     async function fetchPosts(){
-      const r = await fetch('/api/threads');
-      const data = await r.json();
-      renderList(data);
-    }
+  const r = await fetch('/api/threads', {
+    headers: HEADERS(),
+  });
+  const data = await r.json();
+  renderList(data);
+}
+
 
     // 글 등록
     document.getElementById('submit').addEventListener('click', async ()=>{
