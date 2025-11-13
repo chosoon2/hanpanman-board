@@ -1,186 +1,250 @@
-// server.js (루트)
-
-// 기본 모듈
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const express = require('express');
-
-const app = express();
-app.use(express.json());
-
-// ----------------------
-// 데이터 파일 셋업
-// ----------------------
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-const DB_PATH = path.join(DATA_DIR, 'threads.json');
-
-function load() {
-  try {
-    if (!fs.existsSync(DB_PATH)) return [];
-    const raw = fs.readFileSync(DB_PATH, 'utf8');
-    if (!raw.trim()) return [];
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error('DB load error:', e);
-    return [];
-  }
-}
-
-function save(arr) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(arr, null, 2), 'utf8');
-  } catch (e) {
-    console.error('DB save error:', e);
-  }
-}
-
-// 관리자 키 (Render 환경변수 ADMIN_KEY 없으면 기본값 hp4129)
-const ADMIN_KEY = process.env.ADMIN_KEY || 'hp4129';
-
-// ----------------------
-// 유틸 함수
-// ----------------------
-
-// 익명A/B/C... 닉네임 생성
-function nextAlias(data) {
-  const last = data[0]?.authorAlias || '익명A';
-  const code = last.replace('익명', '').charCodeAt(0) || 64; // 'A' = 65
-  const nextCode = code >= 90 ? 65 : code + 1; // Z → A
-  return '익명' + String.fromCharCode(nextCode);
-}
-
-// 트리 구조에서 id로 글/댓글 찾기
-function findPostById(list, id) {
-  for (const p of list) {
-    if (p.id === id) return p;
-    if (p.children && p.children.length) {
-      const found = findPostById(p.children, id);
-      if (found) return found;
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>한판만더 익명 게시판</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- 폰트 -->
+  <link href="https://fonts.googleapis.com/css2?family=Gowun+Dodum&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <style>
+    :root{
+      --bg:#141416; --panel:#191a1f; --ink:#f5f5f7; --muted:#c8ccd4;
+      --pink:#ffc9da; --pink-strong:#ffb6c1; --stroke:#2a2c34;
+      --danger:#ff6b88; --ok:#a6f4c5;
     }
-  }
-  return null;
-}
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background:var(--bg); color:var(--ink);
+      font-family:'Gowun Dodum',sans-serif;
+      display:flex; flex-direction:column; align-items:center; gap:22px; padding:28px 16px 80px;
+      background:
+        radial-gradient(1000px 600px at 20% -10%, rgba(255,201,218,.06), transparent 60%),
+        radial-gradient(900px 700px at 90% 10%, rgba(255,182,193,.06), transparent 60%),
+        var(--bg);
+    }
 
-// 댓글/대댓글 삭제용 재귀
-function removeFromTree(list, id) {
-  return list
-    .filter(p => p.id !== id)
-    .map(p => {
-      if (p.children && p.children.length) {
-        p.children = removeFromTree(p.children, id);
+    .wrap{width:min(900px,100%);}
+    header{display:flex; align-items:center; gap:14px; margin-bottom:10px;}
+    header img{width:72px;height:72px;object-fit:contain;filter:drop-shadow(0 6px 14px rgba(255,201,218,.25));}
+    header h1{
+      margin:0; font-size:clamp(26px,4.2vw,40px); font-weight:700; color:var(--pink);
+      text-shadow:0 0 18px rgba(255,201,218,.55);
+    }
+
+    .card{background:var(--panel); border:1px solid var(--stroke); border-radius:18px; padding:22px; box-shadow:0 18px 40px rgba(0,0,0,.35);}
+    .form{margin-top:6px;}
+    .form h2{margin:0 0 14px; color:var(--pink); font-size:1.35rem;}
+
+    .field{
+      width:100%; background:#0f1014; border:1px solid var(--stroke); color:var(--ink);
+      border-radius:12px; padding:12px 14px; font-size:1rem; outline:none; transition:.2s;
+    }
+    .field:focus{border-color:var(--pink); box-shadow:0 0 0 4px rgba(255,201,218,.15);}
+    textarea.field{min-height:140px; resize:vertical;}
+    .row{display:flex; align-items:center; gap:10px; margin-top:10px;}
+    .spacer{flex:1;}
+
+    .btn{
+      position:relative;border:none;background:var(--pink);color:#17181c;font-weight:700;
+      padding:11px 18px;border-radius:12px;cursor:pointer;transition:.15s;
+      box-shadow:0 8px 22px rgba(255,201,218,.25);overflow:hidden;
+    }
+    .btn:hover{background:var(--pink-strong);transform:translateY(-1px);}
+    .btn:active{transform:translateY(0);}
+    .btn::after{
+      content:"";position:absolute;inset:0;
+      background:linear-gradient(120deg,transparent 0%,rgba(255,255,255,.35) 20%,transparent 40%);
+      transform:translateX(-120%);
+    }
+    .btn:hover::after{animation:shine .9s ease;}
+    @keyframes shine{
+      from{transform:translateX(-120%) skewX(-12deg)}
+      to{transform:translateX(120%) skewX(-12deg)}
+    }
+
+    .list{margin-top:18px;display:flex;flex-direction:column;gap:12px;}
+    .post{
+      background:var(--panel); border:1px solid var(--stroke); border-radius:16px; padding:16px 16px 12px;
+      box-shadow:0 18px 40px rgba(0,0,0,.35);
+    }
+    .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:.95rem;margin-bottom:6px;}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:.85rem;border:1px solid var(--stroke);background:#121318;}
+    .badge.lock{border-color:rgba(255,201,218,.55);color:var(--pink);}
+    .content{white-space:pre-wrap;line-height:1.55;}
+    .actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+    .btn-line{
+      background:transparent;border:1px solid var(--stroke);color:var(--ink);
+      border-radius:10px;padding:6px 10px;cursor:pointer;font-size:.9rem;
+    }
+    .btn-line:hover{border-color:var(--pink);color:var(--pink);}
+    .danger{border-color:rgba(255,107,136,.4)!important;color:var(--danger)!important;}
+    .muted{color:var(--muted);}
+
+    .children{
+      margin-left:22px;margin-top:8px;display:flex;flex-direction:column;gap:10px;
+      border-left:2px dashed var(--stroke);padding-left:12px;
+    }
+
+    .admin-chip{
+      margin-left:auto;color:#222;background:var(--ok);
+      padding:2px 8px;border-radius:999px;font-size:.8rem;
+    }
+
+    @media (max-width:520px){
+      header img{width:60px;height:60px;}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="logo.png" alt="한판만더 로고">
+      <h1>한판만더 익명 게시판</h1>
+    </header>
+
+    <section class="card form">
+      <h2>새 글쓰기</h2>
+      <input id="title" class="field" placeholder="제목 (선택)">
+      <textarea id="body" class="field" placeholder="내용 (익명)"></textarea>
+      <div class="row">
+        <div class="muted">개인정보 금지 · 서버시간 기록</div>
+        <div class="spacer"></div>
+        <button id="submit" class="btn">등록</button>
+      </div>
+    </section>
+
+    <section id="list" class="list"></section>
+  </div>
+
+  <script>
+    // 관리자 여부 (F12 콘솔에서 한 번만 입력)
+    // localStorage.setItem('clan_admin_key','hp4129')
+    const isAdmin = !!localStorage.getItem('clan_admin_key');
+    const HEADERS = () =>
+      isAdmin ? { 'X-Admin-Key': localStorage.getItem('clan_admin_key') } : {};
+
+    // 글 목록 불러오기
+    async function fetchPosts() {
+      const r = await fetch('/api/threads', {
+        headers: HEADERS(),
+      });
+      const data = await r.json();
+      renderList(data);
+    }
+
+    // 글 등록
+    document.getElementById('submit').addEventListener('click', async () => {
+      const title = document.getElementById('title').value.trim();
+      const body  = document.getElementById('body').value.trim();
+      if (!body) {
+        alert('내용을 입력해 주세요.');
+        return;
       }
-      return p;
+
+      await fetch('/api/threads', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ title, body })
+      });
+
+      document.getElementById('title').value = '';
+      document.getElementById('body').value = '';
+      fetchPosts();
     });
-}
 
-// 관리자 체크 미들웨어
-function requireAdmin(req, res, next) {
-  const key = req.get('X-Admin-Key');
-  if (!key || key !== ADMIN_KEY) {
-    return res.status(401).json({ error: 'admin required' });
-  }
-  next();
-}
+    // 관리자: 공개/비공개 전환
+    async function setPrivacy(id, priv) {
+      const r = await fetch(`/api/threads/${id}/privacy`, {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json', ...HEADERS()},
+        body: JSON.stringify({ private: !!priv })
+      });
+      if (r.status === 401) {
+        alert('관리자 권한이 필요합니다.');
+        return;
+      }
+      fetchPosts();
+    }
 
-// ----------------------
-// API 라우트
-// ----------------------
+    // 관리자: 삭제
+    async function removePost(id) {
+      if (!confirm('정말 삭제할까요?')) return;
+      const r = await fetch(`/api/threads/${id}`, {
+        method:'DELETE',
+        headers: HEADERS()
+      });
+      if (r.status === 401) {
+        alert('관리자 권한이 필요합니다.');
+        return;
+      }
+      fetchPosts();
+    }
 
-// 목록: 일반 유저는 비공개 숨김, 관리자만 전체
-app.get('/api/threads', (req, res) => {
-  const data = load();
-  const isAdmin = req.get('X-Admin-Key') === ADMIN_KEY;
-  const result = isAdmin ? data : data.filter(p => !p.private);
-  res.json(result);
-});
+    // 댓글 입력 (간단히 prompt 사용)
+    async function replyPrompt(parentId) {
+      const body = prompt('댓글 내용을 입력해 주세요.');
+      if (!body || !body.trim()) return;
 
-// 글 등록
-app.post('/api/threads', (req, res) => {
-  const data = load();
-  const { title, body } = req.body || {};
+      await fetch(`/api/threads/${parentId}/replies`, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ body })
+      });
 
-  if (!body || !String(body).trim()) {
-    return res.status(400).json({ error: 'body required' });
-  }
+      fetchPosts();
+    }
 
-  const post = {
-    id: crypto.randomUUID(),
-    title: (title || '').slice(0, 200),
-    body: String(body).slice(0, 5000),
-    authorAlias: nextAlias(data), // 익명A/B...
-    private: false,
-    createdAt: Date.now(),
-    children: []
-  };
+    // 리스트 렌더링 (카드 + 대댓글 트리)
+    function renderList(items) {
+      const list = document.getElementById('list');
+      if (!items.length) {
+        list.innerHTML = `<div class="muted">아직 등록된 글이 없어요. 첫 글을 남겨보세요!</div>`;
+        return;
+      }
 
-  data.unshift(post);
-  save(data);
-  res.json({ ok: true, id: post.id });
-});
+      const tpl = (p, depth = 0) => `
+        <div class="post" data-id="${p.id}">
+          <div class="meta">
+            <span class="badge">${p.authorAlias ?? '익명'}</span>
+            ${p.private ? `<span class="badge lock">🔒 비공개</span>` : ''}
+            <span class="muted">· ${new Date(p.createdAt).toLocaleString()}</span>
+            ${isAdmin ? `<span class="admin-chip">ADMIN</span>` : ''}
+          </div>
+          ${p.title
+            ? `<div class="content" style="font-weight:700;margin-bottom:6px">${escapeHtml(p.title)}</div>`
+            : ''}
+          <div class="content">${escapeHtml(p.body)}</div>
+          <div class="actions">
+            <button class="btn-line" onclick="replyPrompt('${p.id}')">댓글</button>
+            ${isAdmin ? `
+              <button class="btn-line" onclick="setPrivacy('${p.id}', ${!p.private})">
+                ${p.private ? '공개로 전환' : '비공개로 전환'}
+              </button>
+              <button class="btn-line danger" onclick="removePost('${p.id}')">삭제</button>
+            ` : ''}
+          </div>
+          ${p.children && p.children.length
+            ? `<div class="children">
+                ${p.children.map(c => tpl(c, depth + 1)).join('')}
+               </div>`
+            : ''}
+        </div>
+      `;
 
-// 관리자: 공개/비공개 전환
-app.patch('/api/threads/:id/privacy', requireAdmin, (req, res) => {
-  const data = load();
-  const t = findPostById(data, req.params.id);
-  if (!t) return res.status(404).json({ error: 'not found' });
+      list.innerHTML = items.map(p => tpl(p)).join('');
+    }
 
-  t.private = !!req.body.private;
-  save(data);
-  res.json({ ok: true, private: t.private });
-});
+    // XSS 방지
+    const escapeHtml = s =>
+      String(s).replace(/[&<>"']/g, m =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]
+      ));
 
-// 관리자: 글/댓글 삭제
-app.delete('/api/threads/:id', requireAdmin, (req, res) => {
-  let data = load();
-  const before = data.length;
-  data = removeFromTree(data, req.params.id);
-  save(data);
-  const after = data.length;
-  res.json({ ok: true, removed: before - after });
-});
-
-// 댓글(대댓글) 추가
-app.post('/api/threads/:id/replies', (req, res) => {
-  const data = load();
-  const parent = findPostById(data, req.params.id);
-  if (!parent) return res.status(404).json({ error: 'parent not found' });
-
-  const { body } = req.body || {};
-  if (!body || !String(body).trim()) {
-    return res.status(400).json({ error: 'body required' });
-  }
-
-  const reply = {
-    id: crypto.randomUUID(),
-    title: '',
-    body: String(body).slice(0, 2000),
-    authorAlias: parent.authorAlias || '익명',
-    private: !!parent.private,
-    createdAt: Date.now(),
-    children: []
-  };
-
-  if (!Array.isArray(parent.children)) parent.children = [];
-  parent.children.push(reply);
-  save(data);
-
-  res.json({ ok: true, id: reply.id });
-});
-
-// ----------------------
-// 정적 파일 (프론트)
-// ----------------------
-app.use(express.static(path.join(__dirname, 'public')));
-
-// ----------------------
-// 서버 시작
-// ----------------------
-const PORT = process.env.PORT || 10000; // Render에서 자동 감지
-app.listen(PORT, () => {
-  console.log(`✅ server on http://localhost:${PORT}`);
-});
-
+    // 시작할 때 목록 한 번 불러오기
+    fetchPosts();
+  </script>
+</body>
+</html>
