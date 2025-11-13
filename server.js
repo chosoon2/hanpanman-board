@@ -1,4 +1,6 @@
-// server/server.js
+// server.js (루트)
+
+// 기본 모듈
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -7,80 +9,177 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
-// --- 데이터 폴더 준비
+// ----------------------
+// 데이터 파일 셋업
+// ----------------------
 const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 const DB_PATH = path.join(DATA_DIR, 'threads.json');
-const load = () => fs.existsSync(DB_PATH) ? JSON.parse(fs.readFileSync(DB_PATH,'utf8')) : [];
-const save = (arr) => fs.writeFileSync(DB_PATH, JSON.stringify(arr, null, 2));
 
+function load() {
+  try {
+    if (!fs.existsSync(DB_PATH)) return [];
+    const raw = fs.readFileSync(DB_PATH, 'utf8');
+    if (!raw.trim()) return [];
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error('DB load error:', e);
+    return [];
+  }
+}
+
+function save(arr) {
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(arr, null, 2), 'utf8');
+  } catch (e) {
+    console.error('DB save error:', e);
+  }
+}
+
+// 관리자 키 (Render 환경변수 ADMIN_KEY 없으면 기본값 hp4129)
 const ADMIN_KEY = process.env.ADMIN_KEY || 'hp4129';
 
-// --- 관리자 확인 미들웨어
-function requireAdmin(req, res, next){
+// ----------------------
+// 유틸 함수
+// ----------------------
+
+// 익명A/B/C... 닉네임 생성
+function nextAlias(data) {
+  const last = data[0]?.authorAlias || '익명A';
+  const code = last.replace('익명', '').charCodeAt(0) || 64; // 'A' = 65
+  const nextCode = code >= 90 ? 65 : code + 1; // Z → A
+  return '익명' + String.fromCharCode(nextCode);
+}
+
+// 트리 구조에서 id로 글/댓글 찾기
+function findPostById(list, id) {
+  for (const p of list) {
+    if (p.id === id) return p;
+    if (p.children && p.children.length) {
+      const found = findPostById(p.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// 댓글/대댓글 삭제용 재귀
+function removeFromTree(list, id) {
+  return list
+    .filter(p => p.id !== id)
+    .map(p => {
+      if (p.children && p.children.length) {
+        p.children = removeFromTree(p.children, id);
+      }
+      return p;
+    });
+}
+
+// 관리자 체크 미들웨어
+function requireAdmin(req, res, next) {
   const key = req.get('X-Admin-Key');
-  if(!key || key !== ADMIN_KEY) return res.status(401).json({error:'admin required'});
+  if (!key || key !== ADMIN_KEY) {
+    return res.status(401).json({ error: 'admin required' });
+  }
   next();
 }
 
-// --- 목록 (일반 유저는 비공개 글 숨김)
-app.get('/api/threads', (req,res)=>{
+// ----------------------
+// API 라우트
+// ----------------------
+
+// 목록: 일반 유저는 비공개 숨김, 관리자만 전체
+app.get('/api/threads', (req, res) => {
   const data = load();
   const isAdmin = req.get('X-Admin-Key') === ADMIN_KEY;
-  const filtered = isAdmin ? data : data.filter(p => !p.private);
-  res.json(filtered);
+  const result = isAdmin ? data : data.filter(p => !p.private);
+  res.json(result);
 });
 
-// --- 글 등록
-app.post('/api/threads', (req,res)=>{
+// 글 등록
+app.post('/api/threads', (req, res) => {
   const data = load();
   const { title, body } = req.body || {};
-  if (!body || !String(body).trim()) return res.status(400).json({error:'body required'});
+
+  if (!body || !String(body).trim()) {
+    return res.status(400).json({ error: 'body required' });
+  }
 
   const post = {
     id: crypto.randomUUID(),
-    title: (title || '').slice(0,200),
-    body:  String(body).slice(0,5000),
-    authorAlias: nextAlias(data), // 익명A/B/C…
+    title: (title || '').slice(0, 200),
+    body: String(body).slice(0, 5000),
+    authorAlias: nextAlias(data), // 익명A/B...
     private: false,
     createdAt: Date.now(),
     children: []
   };
+
   data.unshift(post);
   save(data);
-  res.json({ok:true, id:post.id});
+  res.json({ ok: true, id: post.id });
 });
 
-// --- 관리자: 비공개/공개 전환
-app.patch('/api/threads/:id/privacy', requireAdmin, (req,res)=>{
+// 관리자: 공개/비공개 전환
+app.patch('/api/threads/:id/privacy', requireAdmin, (req, res) => {
   const data = load();
-  const t = data.find(p=>p.id===req.params.id);
-  if(!t) return res.status(404).json({error:'not found'});
+  const t = findPostById(data, req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+
   t.private = !!req.body.private;
   save(data);
-  res.json({ok:true, private:t.private});
+  res.json({ ok: true, private: t.private });
 });
 
-// --- 관리자: 삭제
-app.delete('/api/threads/:id', requireAdmin, (req,res)=>{
+// 관리자: 글/댓글 삭제
+app.delete('/api/threads/:id', requireAdmin, (req, res) => {
   let data = load();
   const before = data.length;
-  data = data.filter(p=>p.id!==req.params.id);
+  data = removeFromTree(data, req.params.id);
   save(data);
-  res.json({ok:true, removed: before - data.length});
+  const after = data.length;
+  res.json({ ok: true, removed: before - after });
 });
 
-// --- 익명 A/B/C… 생성기
-function nextAlias(data){
-  const last = data[0]?.authorAlias || '익명A';
-  const code = (last.replace('익명','').charCodeAt(0) || 64); // A=65
-  const nextCode = code >= 90 ? 65 : code + 1; // Z -> A
-  return '익명' + String.fromCharCode(nextCode);
-}
+// 댓글(대댓글) 추가
+app.post('/api/threads/:id/replies', (req, res) => {
+  const data = load();
+  const parent = findPostById(data, req.params.id);
+  if (!parent) return res.status(404).json({ error: 'parent not found' });
 
+  const { body } = req.body || {};
+  if (!body || !String(body).trim()) {
+    return res.status(400).json({ error: 'body required' });
+  }
+
+  const reply = {
+    id: crypto.randomUUID(),
+    title: '',
+    body: String(body).slice(0, 2000),
+    authorAlias: parent.authorAlias || '익명',
+    private: !!parent.private,
+    createdAt: Date.now(),
+    children: []
+  };
+
+  if (!Array.isArray(parent.children)) parent.children = [];
+  parent.children.push(reply);
+  save(data);
+
+  res.json({ ok: true, id: reply.id });
+});
+
+// ----------------------
 // 정적 파일 (프론트)
+// ----------------------
 app.use(express.static(path.join(__dirname, 'public')));
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, ()=> console.log(`✅ server on http://localhost:${PORT}`));
+// ----------------------
+// 서버 시작
+// ----------------------
+const PORT = process.env.PORT || 10000; // Render에서 자동 감지
+app.listen(PORT, () => {
+  console.log(`✅ server on http://localhost:${PORT}`);
+});
